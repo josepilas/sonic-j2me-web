@@ -26,7 +26,7 @@ import { KEY_DOWN, KEY_FIRE, KEY_LEFT, KEY_PAUSE, KEY_RIGHT, KEY_UP } from "../p
 import type { MIDlet } from "../platform/j2me/MIDlet";
 import { ResourceLoader } from "../platform/j2me/ResourceLoader";
 import { Audio, AUDIO_TRACKS } from "./Audio";
-import type { LevelTile } from "./LevelLoader";
+import type { LevelObject, LevelTile } from "./LevelLoader";
 import { LevelLoader } from "./LevelLoader";
 import type { GameProgress, HighscoreEntry } from "./SaveManager";
 import { SaveManager } from "./SaveManager";
@@ -45,13 +45,20 @@ interface LevelRing {
 }
 
 interface LevelEnemy {
+  sourceType: number;
   x: number;
   y: number;
+  originX: number;
   width: number;
   height: number;
   alive: boolean;
-  type: "moto" | "bee";
+  type: "moto" | "bee" | "fish" | "kamere" | "kani";
   direction: -1 | 1;
+}
+
+interface ActiveLevelObject extends LevelObject {
+  active: boolean;
+  stateFrame: number;
 }
 
 interface PlayerState {
@@ -62,6 +69,7 @@ interface PlayerState {
   groundSpeed: number;
   animationDistance: number;
   idleTimer: number;
+  springLaunchFrames: number;
   width: number;
   height: number;
   facing: -1 | 1;
@@ -72,15 +80,27 @@ interface PlayerState {
 }
 
 const SONIC_FIXED_SCALE = 256;
+const J2ME_TO_CANVAS_SCALE = 3 / 4;
 const SONIC_BASE_SPEED_FIXED = 1536;
-const SONIC_GROUND_ACCELERATION = 12 / SONIC_FIXED_SCALE;
-const SONIC_BRAKE_ACCELERATION = 128 / SONIC_FIXED_SCALE;
-const SONIC_GRAVITY = 56 / SONIC_FIXED_SCALE;
-const SONIC_JUMP_SPEED = 1664 / SONIC_FIXED_SCALE;
-const SONIC_SHORT_JUMP_SPEED = 896 / SONIC_FIXED_SCALE;
-const SONIC_GROUND_TOP_SPEED = SONIC_BASE_SPEED_FIXED / SONIC_FIXED_SCALE;
-const SONIC_AIR_TOP_SPEED = 4096 / SONIC_FIXED_SCALE;
+const toCanvasVelocity = (fixedValue: number) => (fixedValue / SONIC_FIXED_SCALE) * J2ME_TO_CANVAS_SCALE;
+const SONIC_GROUND_ACCELERATION = toCanvasVelocity(12);
+const SONIC_BRAKE_ACCELERATION = toCanvasVelocity(128);
+const SONIC_GRAVITY = toCanvasVelocity(56);
+const SONIC_JUMP_SPEED = toCanvasVelocity(1664);
+const SONIC_SHORT_JUMP_SPEED = toCanvasVelocity(896);
+const SONIC_SPRING_SPEED = toCanvasVelocity(4096);
+const SONIC_ENEMY_BOUNCE_SPEED = toCanvasVelocity(2560);
+const SONIC_HURT_X_SPEED = toCanvasVelocity(512);
+const SONIC_HURT_Y_SPEED = toCanvasVelocity(1024);
+const SONIC_GROUND_TOP_SPEED = toCanvasVelocity(SONIC_BASE_SPEED_FIXED);
+const SONIC_AIR_TOP_SPEED = toCanvasVelocity(4096);
 const SONIC_STOP_EPSILON = 0.015;
+const SONIC_SPRING_LAUNCH_FRAMES = 18;
+const GREEN_HILL_ACT_SPAWNS = [
+  { x: 80, y: 944 + 20 },
+  { x: 80, y: 252 + 20 },
+  { x: 80, y: 944 + 20 },
+];
 
 export class GameCanvas extends Canvas {
   static readonly defaultFont = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_PLAIN, Font.SIZE_LARGE);
@@ -133,7 +153,7 @@ export class GameCanvas extends Canvas {
   private sonicImage: Image | null = null;
   private enemyImage: Image | null = null;
   private beeImage: Image | null = null;
-  private itemImage: Image | null = null;
+  private readonly objectImages = new Map<number, Image>();
   private initialized = false;
   private selectedMenuItem = 0;
   private loadingTicks = 0;
@@ -145,7 +165,10 @@ export class GameCanvas extends Canvas {
   private readonly firstActData = new Map<string, Uint8Array>();
   private highscoreEntries: HighscoreEntry[] = [];
   private tilemap: LevelTile[][] = [];
+  private collisionMasks: Uint8Array<ArrayBufferLike> = new Uint8Array();
   private frameData: number[][][] = [];
+  private loadedLevelObjects: LevelObject[] = [];
+  private levelObjects: ActiveLevelObject[] = [];
   private collisionRects: CollisionRect[] = [];
   private levelRings: LevelRing[] = [];
   private levelEnemies: LevelEnemy[] = [];
@@ -340,13 +363,12 @@ export class GameCanvas extends Canvas {
 
   async loadFirstActAssets(): Promise<void> {
     this.loadingStatus = "LOADING IMAGES";
-    const [zoneImage, sonicImage, ringImage, enemyImage, beeImage, itemImage] = await Promise.all([
+    const [zoneImage, sonicImage, ringImage, enemyImage, beeImage] = await Promise.all([
       this.resources.loadImage("zone1.png"),
       this.resources.loadImage("sonic.png"),
       this.resources.loadImage("ring.png"),
       this.resources.loadImage("musi.png"),
       this.resources.loadImage("hachi.png"),
-      this.resources.loadImage("item.png"),
     ]);
 
     this.zoneImage = zoneImage;
@@ -354,7 +376,7 @@ export class GameCanvas extends Canvas {
     this.ringImage = ringImage;
     this.enemyImage = enemyImage;
     this.beeImage = beeImage;
-    this.itemImage = itemImage;
+    await this.loadObjectImages();
     void this.audio.preloadTrack(0);
 
     this.loadingStatus = "LOADING LEVEL DATA";
@@ -376,16 +398,62 @@ export class GameCanvas extends Canvas {
     }
 
     this.loadingStatus = "DECODING LEVEL";
-    const [decodedLevel, frameData] = await Promise.all([
+    const [decodedLevel, frameData, levelObjects] = await Promise.all([
       this.levelLoader.loadGreenHillAct(this.actID),
       this.levelLoader.loadFrameData(),
+      this.levelLoader.loadGreenHillObjects(this.actID),
     ]);
 
     this.tilemap = decodedLevel.tiles;
+    this.collisionMasks = decodedLevel.collisionMasks;
     this.frameData = frameData;
+    this.loadedLevelObjects = levelObjects;
     this.worldWidth = decodedLevel.width;
     this.worldHeight = decodedLevel.height;
     this.rebuildCollisionRects();
+  }
+
+  private async loadObjectImages(): Promise<void> {
+    const entries: Array<[number, string]> = [
+      [0, "ring.png"],
+      [2, "sjump.png"],
+      [3, "buranko.png"],
+      [4, "thashi.png"],
+      [5, "hashi.png"],
+      [6, "break.png"],
+      [9, "toge.png"],
+      [15, "switch.png"],
+      [16, "shima.png"],
+      [18, "brkabe_g.png"],
+      [36, "save.png"],
+      [37, "kageb.png"],
+      [39, "kamere.png"],
+      [40, "hachi.png"],
+      [41, "musi.png"],
+      [42, "item.png"],
+      [44, "gole.png"],
+      [45, "bten.png"],
+      [47, "ring_large.png"],
+      [57, "kani.png"],
+      [58, "jyama.png"],
+      [86, "fish.png"],
+      [96, "tama.png"],
+      [97, "bakuhatu.png"],
+      [100, "animal.png"],
+      [109, "effect.png"],
+      [153, "sjump2.png"],
+      [154, "emeralds.png"],
+    ];
+
+    const loaded = await Promise.allSettled(
+      entries.map(async ([type, name]) => [type, await this.resources.loadImage(name)] as const),
+    );
+
+    for (const result of loaded) {
+      if (result.status === "fulfilled") {
+        this.objectImages.set(result.value[0], result.value[1]);
+      }
+    }
   }
 
   update(_delta: number): void {}
@@ -395,14 +463,23 @@ export class GameCanvas extends Canvas {
   }
 
   drawScreenBackground(g: Graphics, x: number, y: number, w: number, h: number): void {
-    g.setColor(0x0046a8);
-    g.fillRect(x, y, w, h);
-    g.setColor(0x0075d8);
-    g.fillRect(x, y + Math.floor(h * 0.45), w, Math.ceil(h * 0.55));
-    g.setColor(0x00a84f);
-    g.fillRect(x, y + h - 54, w, 54);
-    g.setColor(0x8b5a2b);
-    g.fillRect(x, y + h - 20, w, 20);
+    for (let line = 0; line < h; line += 1) {
+      const lineY = line + y;
+      if (lineY === 0) {
+        g.setColor(0x81cdf2);
+      } else if (lineY % 3 === 0) {
+        g.setColor(0x1c5acc);
+      } else {
+        g.setColor(0x2273fb);
+      }
+
+      g.fillRect(x, lineY, w, 1);
+    }
+
+    if (x === 0) {
+      g.setColor(0x2273fb);
+      g.fillRect(x, y, 1, h);
+    }
   }
 
   drawSonicLogo(g: Graphics): void {
@@ -589,6 +666,7 @@ export class GameCanvas extends Canvas {
 
     this.actTimerFrames += Math.max(1, Math.round(delta / 16));
     this.updatePlayer(delta);
+    this.updateLevelObjects();
     this.updateEnemies();
     this.collectRings();
     this.checkEnemyCollisions();
@@ -645,12 +723,11 @@ export class GameCanvas extends Canvas {
 
   protected renderGameplay(g: Graphics): void {
     this.drawScreenBackground(g, 0, 0, this.getWidth(), this.getHeight());
-    this.drawTileLayer(g, false);
+    this.drawTileLayer(g, null);
     this.drawRings(g);
+    this.drawLevelObjects(g);
     this.drawEnemies(g);
-    this.drawGoalObject(g);
     this.drawPlayer(g);
-    this.drawTileLayer(g, true);
     this.drawHud(g);
 
     if (!this.player.alive) {
@@ -696,41 +773,42 @@ export class GameCanvas extends Canvas {
     this.actTimerFrames = 0;
     this.actCleared = false;
     this.actClearFrames = 0;
-    this.levelRings = [
-      this.createRing(184, 42),
-      this.createRing(216, 54),
-      this.createRing(248, 42),
-      this.createRing(448, 42),
-      this.createRing(480, 54),
-      this.createRing(512, 42),
-      this.createRing(760, 42),
-      this.createRing(792, 54),
-      this.createRing(824, 42),
-    ];
-    this.levelEnemies = [
-      this.createEnemy(352, "moto", -1),
-      this.createEnemy(620, "bee", 1),
-      this.createEnemy(980, "moto", -1),
-    ];
+    this.levelObjects = this.loadedLevelObjects
+      .filter((object) => object.type !== 255)
+      .map((object) => ({
+        ...object,
+        x: this.toCanvasCoordinate(object.x),
+        y: this.toCanvasCoordinate(object.y),
+        active: true,
+        stateFrame: 0,
+      }));
+    this.levelRings = this.levelObjects
+      .filter((object) => object.ring)
+      .map((object) => ({ x: object.x, y: object.y, collected: false }));
+    this.levelEnemies = this.levelObjects
+      .filter((object) => this.isEnemyObjectType(object.type))
+      .map((object) => this.createEnemyFromObject(object));
   }
 
   private createInitialPlayer(): PlayerState {
-    const x = 40;
     const width = 20;
     const height = 28;
-    const groundY = this.findGroundYAt(x + Math.floor(width / 2));
+    const spawn = GREEN_HILL_ACT_SPAWNS[this.actID] ?? GREEN_HILL_ACT_SPAWNS[0];
+    const x = this.toCanvasCoordinate(spawn.x) - Math.floor(width / 2);
+    const y = this.toCanvasCoordinate(spawn.y) - height;
     return {
       x,
-      y: groundY > 0 ? groundY - height : 190,
+      y,
       vx: 0,
       vy: 0,
       groundSpeed: 0,
       animationDistance: 0,
       idleTimer: 0,
+      springLaunchFrames: 0,
       width,
       height,
       facing: 1,
-      grounded: groundY > 0,
+      grounded: true,
       jumping: false,
       hurtTimer: 0,
       alive: true,
@@ -744,33 +822,36 @@ export class GameCanvas extends Canvas {
     this.saveGameProgress();
   }
 
-  private updatePlayer(delta: number): void {
-    const frameScale = Math.max(0.25, Math.min(2, delta / 16));
+  private updatePlayer(_delta: number): void {
+    const wasGrounded = this.player.grounded;
     const leftPressed = this.pressedKeys[KEY_LEFT] === true;
     const rightPressed = this.pressedKeys[KEY_RIGHT] === true;
     const jumpPressed = this.consumeKeyPress(KEY_FIRE);
-    const acceleration = SONIC_GROUND_ACCELERATION * frameScale;
-    const brakeAcceleration = SONIC_BRAKE_ACCELERATION * frameScale;
 
     if (jumpPressed && this.player.grounded) {
       this.player.vy = -SONIC_JUMP_SPEED;
       this.player.grounded = false;
       this.player.jumping = true;
+      this.player.springLaunchFrames = 0;
+    }
+
+    if (this.player.springLaunchFrames > 0) {
+      this.player.springLaunchFrames -= 1;
     }
 
     if (this.player.grounded) {
       if (leftPressed && !rightPressed) {
         this.player.facing = -1;
         this.player.vx = this.player.vx > 0
-          ? this.approach(this.player.vx, 0, brakeAcceleration)
-          : this.player.vx - acceleration * (Math.abs(this.player.vx) <= SONIC_STOP_EPSILON ? 2 : 1);
+          ? this.approach(this.player.vx, 0, SONIC_BRAKE_ACCELERATION)
+          : this.player.vx - SONIC_GROUND_ACCELERATION * (Math.abs(this.player.vx) <= SONIC_STOP_EPSILON ? 2 : 1);
       } else if (rightPressed && !leftPressed) {
         this.player.facing = 1;
         this.player.vx = this.player.vx < 0
-          ? this.approach(this.player.vx, 0, brakeAcceleration)
-          : this.player.vx + acceleration * (Math.abs(this.player.vx) <= SONIC_STOP_EPSILON ? 2 : 1);
+          ? this.approach(this.player.vx, 0, SONIC_BRAKE_ACCELERATION)
+          : this.player.vx + SONIC_GROUND_ACCELERATION * (Math.abs(this.player.vx) <= SONIC_STOP_EPSILON ? 2 : 1);
       } else {
-        this.player.vx = this.approach(this.player.vx, 0, acceleration);
+        this.player.vx = this.approach(this.player.vx, 0, SONIC_GROUND_ACCELERATION);
       }
 
       this.player.vx = Math.max(-SONIC_GROUND_TOP_SPEED, Math.min(SONIC_GROUND_TOP_SPEED, this.player.vx));
@@ -778,31 +859,44 @@ export class GameCanvas extends Canvas {
     } else {
       if (leftPressed && !rightPressed) {
         this.player.facing = -1;
-        this.player.vx = this.player.vx === 0 ? -brakeAcceleration * 2 : this.player.vx - acceleration;
+        this.player.vx = Math.abs(this.player.vx) <= SONIC_STOP_EPSILON
+          ? -(SONIC_BRAKE_ACCELERATION * 2)
+          : this.player.vx - SONIC_GROUND_ACCELERATION;
         if (this.player.vx > 0) {
-          this.player.vx -= acceleration;
+          this.player.vx -= SONIC_GROUND_ACCELERATION;
         }
       } else if (rightPressed && !leftPressed) {
         this.player.facing = 1;
-        this.player.vx = this.player.vx === 0 ? brakeAcceleration * 2 : this.player.vx + acceleration;
+        this.player.vx = Math.abs(this.player.vx) <= SONIC_STOP_EPSILON
+          ? SONIC_BRAKE_ACCELERATION * 2
+          : this.player.vx + SONIC_GROUND_ACCELERATION;
         if (this.player.vx < 0) {
-          this.player.vx += acceleration;
+          this.player.vx += SONIC_GROUND_ACCELERATION;
         }
       }
 
-      if (!this.pressedKeys[KEY_FIRE] && this.player.vy < -SONIC_SHORT_JUMP_SPEED) {
+      if (
+        this.player.springLaunchFrames <= 0
+        && !this.pressedKeys[KEY_FIRE]
+        && this.player.vy < -SONIC_SHORT_JUMP_SPEED
+      ) {
         this.player.vy = -SONIC_SHORT_JUMP_SPEED;
       }
 
       this.player.vx = Math.max(-SONIC_AIR_TOP_SPEED, Math.min(SONIC_AIR_TOP_SPEED, this.player.vx));
-      this.player.vy += SONIC_GRAVITY * frameScale;
+      this.player.vy += SONIC_GRAVITY;
     }
 
-    this.player.x += this.player.vx * frameScale;
+    this.player.x += this.player.vx;
     this.resolveHorizontalCollisions();
-    this.player.y += this.player.vy * frameScale;
+    const previousY = this.player.y;
+    this.player.y += this.player.vy;
     this.resolveVerticalCollisions();
-    this.updatePlayerAnimation(frameScale);
+    if (wasGrounded && !this.player.grounded && !this.player.jumping && this.player.vy >= 0) {
+      this.snapPlayerToGround();
+    }
+    this.resolveLevelObjectCollisions(previousY);
+    this.updatePlayerAnimation(1);
 
     this.player.x = Math.max(0, Math.min(this.worldWidth - this.player.width, this.player.x));
     if (this.player.y > this.worldHeight + 40) {
@@ -815,41 +909,180 @@ export class GameCanvas extends Canvas {
   }
 
   private resolveHorizontalCollisions(): void {
-    const playerRect = this.getPlayerRect();
-    for (const rect of this.collisionRects) {
-      if (!this.intersects(playerRect, rect)) {
-        continue;
-      }
-
-      if (this.player.vx > 0) {
-        this.player.x = rect.x - this.player.width;
-      } else if (this.player.vx < 0) {
-        this.player.x = rect.x + rect.width;
-      }
-      this.player.vx = 0;
-      this.player.groundSpeed = 0;
+    if (Math.abs(this.player.vx) <= SONIC_STOP_EPSILON) {
       return;
     }
+
+    const direction = this.player.vx > 0 ? 1 : -1;
+    const sideX = () => direction > 0 ? this.player.x + this.player.width : this.player.x;
+    const probeYs = () => [
+      this.player.y + this.player.height - 8,
+      this.player.y + this.player.height - 20,
+    ];
+
+    if (!probeYs().some((y) => this.isWorldSolidAt(sideX(), y))) {
+      return;
+    }
+
+    for (let correction = 0; correction < TILE_SIZE * 2; correction += 1) {
+      this.player.x -= direction;
+      if (!probeYs().some((y) => this.isWorldSolidAt(sideX(), y))) {
+        break;
+      }
+    }
+
+    this.player.vx = 0;
+    this.player.groundSpeed = 0;
   }
 
   private resolveVerticalCollisions(): void {
     this.player.grounded = false;
-    const playerRect = this.getPlayerRect();
-    for (const rect of this.collisionRects) {
-      if (!this.intersects(playerRect, rect)) {
-        continue;
+
+    if (this.player.vy >= 0) {
+      if (!this.isPlayerFootSolid(0)) {
+        if (this.isPlayerFootSolid(1)) {
+          this.player.grounded = true;
+          this.player.jumping = false;
+          this.player.groundSpeed = this.player.vx;
+          this.player.vy = 0;
+        }
+        return;
       }
 
-      if (this.player.vy >= 0) {
-        this.player.y = rect.y - this.player.height;
+      for (let correction = 0; correction < TILE_SIZE * 2; correction += 1) {
+        this.player.y -= 1;
+        if (!this.isPlayerFootSolid(0)) {
+          break;
+        }
+      }
+
+      this.player.grounded = true;
+      this.player.jumping = false;
+      this.player.groundSpeed = this.player.vx;
+      this.player.vy = 0;
+      return;
+    }
+
+    if (this.player.springLaunchFrames > 0) {
+      return;
+    }
+
+    const headY = () => this.player.y;
+    const probeXs = () => [
+      this.player.x + 4,
+      this.player.x + this.player.width - 4,
+    ];
+
+    if (!probeXs().some((x) => this.isWorldSolidAt(x, headY()))) {
+      return;
+    }
+
+    for (let correction = 0; correction < TILE_SIZE * 2; correction += 1) {
+      this.player.y += 1;
+      if (!probeXs().some((x) => this.isWorldSolidAt(x, headY()))) {
+        break;
+      }
+    }
+
+    this.player.vy = 0;
+  }
+
+  private snapPlayerToGround(maxDistance = 8): boolean {
+    let moved = 0;
+    while (moved < maxDistance) {
+      this.player.y += 1;
+      moved += 1;
+      if (this.isPlayerFootSolid(1)) {
         this.player.grounded = true;
         this.player.jumping = false;
         this.player.groundSpeed = this.player.vx;
-      } else {
-        this.player.y = rect.y + rect.height;
+        this.player.vy = 0;
+        return true;
       }
-      this.player.vy = 0;
+    }
+
+    this.player.y -= moved;
+    return false;
+  }
+
+  private isPlayerFootSolid(offsetY: number): boolean {
+    const footY = this.player.y + this.player.height + offsetY;
+    return [
+      this.player.x + 4,
+      this.player.x + Math.floor(this.player.width / 2),
+      this.player.x + this.player.width - 4,
+    ].some((x) => this.isWorldSolidAt(x, footY));
+  }
+
+  private resolveLevelObjectCollisions(previousY: number): void {
+    if (this.resolveSpringCollisions(previousY)) {
       return;
+    }
+
+    this.resolvePlatformObjectCollisions(previousY);
+  }
+
+  private resolveSpringCollisions(previousY: number): boolean {
+    if (this.player.springLaunchFrames > 0) {
+      return false;
+    }
+
+    const playerRect = this.getPlayerRect();
+    const previousBottom = previousY + this.player.height;
+    for (const object of this.levelObjects) {
+      if (!object.active || !this.isSpringObjectType(object.type)) {
+        continue;
+      }
+
+      const springRect = this.getSpringRect(object);
+      if (!this.intersects(playerRect, springRect)) {
+        continue;
+      }
+
+      if (previousBottom > springRect.y + 8 && this.player.vy >= 0) {
+        continue;
+      }
+
+      this.player.y = springRect.y - this.player.height;
+      this.player.vy = -SONIC_SPRING_SPEED;
+      this.player.grounded = false;
+      this.player.jumping = true;
+      this.player.groundSpeed = this.player.vx;
+      this.player.springLaunchFrames = SONIC_SPRING_LAUNCH_FRAMES;
+      object.stateFrame = 14;
+      return true;
+    }
+
+    return false;
+  }
+
+  private resolvePlatformObjectCollisions(previousY: number): void {
+    if (this.player.vy < 0) {
+      return;
+    }
+
+    const previousBottom = previousY + this.player.height;
+    const playerRect = this.getPlayerRect();
+    for (const object of this.levelObjects) {
+      const rect = this.getObjectPlatformRect(object);
+      if (!rect || previousBottom > rect.y + 4 || !this.intersects(playerRect, rect)) {
+        continue;
+      }
+
+      this.player.y = rect.y - this.player.height;
+      this.player.vy = 0;
+      this.player.grounded = true;
+      this.player.jumping = false;
+      this.player.groundSpeed = this.player.vx;
+      return;
+    }
+  }
+
+  private updateLevelObjects(): void {
+    for (const object of this.levelObjects) {
+      if (object.stateFrame > 0) {
+        object.stateFrame -= 1;
+      }
     }
   }
 
@@ -860,7 +1093,7 @@ export class GameCanvas extends Canvas {
       }
 
       enemy.x += enemy.direction * 0.35;
-      if (enemy.x < 300 || enemy.x > 1040) {
+      if (Math.abs(enemy.x - enemy.originX) > 36) {
         enemy.direction *= -1;
       }
     }
@@ -889,7 +1122,9 @@ export class GameCanvas extends Canvas {
 
       if (this.player.vy > 0 && this.player.y + this.player.height - enemy.y < 14) {
         enemy.alive = false;
-        this.player.vy = -3.8;
+        this.player.vy = this.player.vy > SONIC_ENEMY_BOUNCE_SPEED
+          ? -SONIC_ENEMY_BOUNCE_SPEED
+          : -Math.max(Math.abs(this.player.vy), SONIC_JUMP_SPEED);
         this.score += 500;
       } else {
         this.damagePlayer();
@@ -905,8 +1140,8 @@ export class GameCanvas extends Canvas {
     if (this.rings > 0) {
       this.rings = 0;
       this.player.hurtTimer = 90;
-      this.player.vx = -this.player.facing * 2.4;
-      this.player.vy = -3.2;
+      this.player.vx = -this.player.facing * SONIC_HURT_X_SPEED;
+      this.player.vy = -SONIC_HURT_Y_SPEED;
       this.player.jumping = true;
       this.player.grounded = false;
       this.saveGameProgress();
@@ -934,7 +1169,7 @@ export class GameCanvas extends Canvas {
     this.cameraY = Math.max(0, Math.min(this.worldHeight - this.getHeight(), this.cameraY));
   }
 
-  private drawTileLayer(g: Graphics, priority: boolean): void {
+  private drawTileLayer(g: Graphics, priority: boolean | null): void {
     const startColumn = Math.max(0, Math.floor(this.cameraX / TILE_SIZE) - 1);
     const endColumn = Math.min(this.tilemap[0]?.length ?? 0, startColumn + Math.ceil(this.getWidth() / TILE_SIZE) + 3);
     const offsetX = Math.floor(this.cameraX);
@@ -945,7 +1180,7 @@ export class GameCanvas extends Canvas {
     for (let row = startRow; row < endRow; row += 1) {
       for (let column = startColumn; column < endColumn; column += 1) {
         const tile = this.tilemap[row][column];
-        if (tile.tileId === 0 || tile.priority !== priority) {
+        if (tile.tileId === 0 || (priority !== null && tile.priority !== priority)) {
           continue;
         }
 
@@ -976,13 +1211,15 @@ export class GameCanvas extends Canvas {
   }
 
   private drawRings(g: Graphics): void {
+    const cameraX = Math.floor(this.cameraX);
+    const cameraY = Math.floor(this.cameraY);
     for (const ring of this.levelRings) {
       if (ring.collected) {
         continue;
       }
 
-      const x = Math.round(ring.x - this.cameraX);
-      const y = Math.round(ring.y - this.cameraY);
+      const x = Math.round(ring.x - cameraX);
+      const y = Math.round(ring.y - cameraY);
       if (x < -16 || x > this.getWidth() + 16) {
         continue;
       }
@@ -997,34 +1234,91 @@ export class GameCanvas extends Canvas {
     }
   }
 
+  private drawLevelObjects(g: Graphics): void {
+    const cameraX = Math.floor(this.cameraX);
+    const cameraY = Math.floor(this.cameraY);
+
+    for (const object of this.levelObjects) {
+      if (!object.active || object.ring || this.isEnemyObjectType(object.type)) {
+        continue;
+      }
+
+      const image = this.objectImages.get(object.type);
+      if (!image) {
+        continue;
+      }
+
+      if (object.type === 5) {
+        this.drawBridgeObject(g, image, object, cameraX, cameraY);
+        continue;
+      }
+
+      const x = Math.round(object.x - cameraX);
+      const y = Math.round(object.y - cameraY);
+      if (x < -64 || x > this.getWidth() + 64 || y < -80 || y > this.getHeight() + 80) {
+        continue;
+      }
+
+      this.drawObjectSprite(
+        g,
+        image,
+        object.type,
+        x,
+        y,
+        (object.param & 1) === 1 ? TRANS_MIRROR : TRANS_NONE,
+        this.getObjectAnchor(object.type),
+        this.getLevelObjectFrameIndex(object),
+      );
+    }
+  }
+
+  private drawBridgeObject(
+    g: Graphics,
+    image: Image,
+    object: ActiveLevelObject,
+    cameraX: number,
+    cameraY: number,
+  ): void {
+    const x = Math.round(object.x - cameraX);
+    const y = Math.round(object.y - cameraY);
+    const segments = Math.max(1, object.count + 1);
+    const width = segments * TILE_SIZE;
+    if (x < -width - 24 || x > this.getWidth() + 24 || y < -24 || y > this.getHeight() + 24) {
+      return;
+    }
+
+    for (let index = 0; index < segments; index += 1) {
+      const sx = (index % Math.max(1, Math.floor(image.getWidth() / TILE_SIZE))) * TILE_SIZE;
+      this.drawRegion(g, image, sx, 0, TILE_SIZE, TILE_SIZE, TRANS_NONE, x + index * TILE_SIZE, y, LEFT | BOTTOM);
+    }
+  }
+
   private drawEnemies(g: Graphics): void {
+    const cameraX = Math.floor(this.cameraX);
+    const cameraY = Math.floor(this.cameraY);
+
     for (const enemy of this.levelEnemies) {
       if (!enemy.alive) {
         continue;
       }
 
-      const x = Math.round(enemy.x - this.cameraX);
-      const y = Math.round(enemy.y - this.cameraY);
+      const x = Math.round(enemy.x - cameraX);
+      const y = Math.round(enemy.y - cameraY);
       if (x < -40 || x > this.getWidth() + 40) {
         continue;
       }
 
-      const image = enemy.type === "bee" ? this.beeImage : this.enemyImage;
+      const image = this.objectImages.get(enemy.sourceType) ?? (enemy.type === "bee" ? this.beeImage : this.enemyImage);
       if (image) {
-        const frameCount = enemy.type === "bee" ? 3 : 3;
-        const frameHeight = Math.floor(image.getHeight() / frameCount);
-        const frame = Math.floor(this.frame / 8) % frameCount;
-        this.drawRegion(
+        this.drawObjectSprite(
           g,
           image,
-          0,
-          frame * frameHeight,
-          image.getWidth(),
-          frameHeight,
+          enemy.sourceType,
+          x + Math.floor(enemy.width / 2),
+          y + Math.floor(enemy.height / 2),
           enemy.direction === -1 ? TRANS_MIRROR : TRANS_NONE,
-          x,
-          y,
-          TOP | LEFT,
+          HCENTER | VCENTER,
+          undefined,
         );
       } else {
         g.setColor(0xe34a2f);
@@ -1033,28 +1327,42 @@ export class GameCanvas extends Canvas {
     }
   }
 
-  private drawGoalObject(g: Graphics): void {
-    const x = Math.round(this.worldWidth - 72 - this.cameraX);
-    const groundY = this.findGroundYAt(this.worldWidth - 60);
-    const y = (groundY > 0 ? groundY : 240) - 32 - Math.floor(this.cameraY);
-    if (x < -32 || x > this.getWidth() + 32) {
+  private drawObjectSprite(
+    g: Graphics,
+    image: Image,
+    type: number,
+    x: number,
+    y: number,
+    transform: number,
+    anchor: number,
+    frameIndex?: number,
+  ): void {
+    const frames = this.frameData[type] ?? [];
+    if (frames.length > 0) {
+      const frame = frames[frameIndex ?? Math.floor(this.frame / 8) % frames.length] ?? frames[0];
+      if (frame) {
+        this.drawRegion(
+          g,
+          image,
+          frame[0] ?? 0,
+          frame[1] ?? 0,
+          frame[2] ?? image.getWidth(),
+          frame[3] ?? image.getHeight(),
+          transform,
+          x,
+          y + (frame[4] ?? 0),
+          anchor,
+        );
+      }
       return;
     }
 
-    if (this.itemImage) {
-      const frameHeight = 24;
-      const frame = Math.floor(this.frame / 8) % Math.max(1, Math.floor(this.itemImage.getHeight() / frameHeight));
-      this.drawRegion(g, this.itemImage, 0, frame * frameHeight, 24, frameHeight, 0, x, y, TOP | LEFT);
-      return;
-    }
-
-    g.setColor(0xffffff);
-    g.fillRect(x, y, 16, 32);
+    this.drawRegion(g, image, 0, 0, image.getWidth(), image.getHeight(), transform, x, y, anchor);
   }
 
   private drawPlayer(g: Graphics): void {
-    const x = Math.round(this.player.x - this.cameraX);
-    const y = Math.round(this.player.y - this.cameraY);
+    const x = Math.round(this.player.x - Math.floor(this.cameraX));
+    const y = Math.round(this.player.y - Math.floor(this.cameraY));
     if (this.player.hurtTimer > 0 && (this.frame & 2) === 0) {
       return;
     }
@@ -1112,6 +1420,49 @@ export class GameCanvas extends Canvas {
       && a.y + a.height > b.y;
   }
 
+  private isWorldSolidAt(canvasX: number, canvasY: number): boolean {
+    if (canvasX < 0 || canvasY < 0) {
+      return true;
+    }
+
+    if (this.collisionMasks.length === 0) {
+      return this.collisionRects.some((rect) => (
+        canvasX >= rect.x
+        && canvasX < rect.x + rect.width
+        && canvasY >= rect.y
+        && canvasY < rect.y + rect.height
+      ));
+    }
+
+    const originalX = Math.floor(canvasX / J2ME_TO_CANVAS_SCALE);
+    const originalY = Math.floor(canvasY / J2ME_TO_CANVAS_SCALE);
+    const column = Math.floor(originalX / 16);
+    const row = Math.floor(originalY / 16);
+    const tile = this.tilemap[row]?.[column];
+    if (!tile || !tile.solid || (!tile.collisionA && !tile.collisionB)) {
+      return false;
+    }
+
+    const localX = originalX & 15;
+    const localY = originalY & 15;
+    const maskBase = tile.collisionMask << 5;
+    let maskIndex = maskBase + (localX << 1) + (localY >> 3);
+    let bit = 7 - (localY & 7);
+
+    if (tile.collisionTransform === 1) {
+      maskIndex = maskBase + ((15 - localX) << 1) + (localY >> 3);
+      bit = 7 - (localY & 7);
+    } else if (tile.collisionTransform === 2) {
+      maskIndex = maskBase + (localX << 1) + ((15 - localY) >> 3);
+      bit = localY & 7;
+    } else if (tile.collisionTransform === 3) {
+      maskIndex = maskBase + ((15 - localX) << 1) + ((15 - localY) >> 3);
+      bit = localY & 7;
+    }
+
+    return (((this.collisionMasks[maskIndex] ?? 0) >> bit) & 1) === 1;
+  }
+
   protected handleCommandAction(): boolean {
     return false;
   }
@@ -1140,39 +1491,133 @@ export class GameCanvas extends Canvas {
     return Math.max(0, Math.min(this.worldHeight - this.getHeight(), targetY));
   }
 
-  private findGroundYAt(x: number): number {
-    const column = Math.max(0, Math.min((this.tilemap[0]?.length ?? 1) - 1, Math.floor(x / TILE_SIZE)));
-    for (let row = 0; row < this.tilemap.length; row += 1) {
-      if (this.tilemap[row][column]?.solid) {
-        return row * TILE_SIZE;
-      }
+  private toCanvasCoordinate(value: number): number {
+    return Math.floor((value * 3) / 4);
+  }
+
+  private isEnemyObjectType(type: number): boolean {
+    return type === 39 || type === 40 || type === 41 || type === 57 || type === 86;
+  }
+
+  private isSpringObjectType(type: number): boolean {
+    return type === 2 || type === 153;
+  }
+
+  private getSpringRect(object: ActiveLevelObject): CollisionRect {
+    return {
+      x: object.x - 12,
+      y: object.y - 12,
+      width: 24,
+      height: 18,
+    };
+  }
+
+  private getObjectPlatformRect(object: ActiveLevelObject): CollisionRect | null {
+    if (!object.active) {
+      return null;
     }
 
-    return 0;
+    if (object.type === 5) {
+      return {
+        x: object.x,
+        y: object.y - TILE_SIZE,
+        width: Math.max(1, object.count + 1) * TILE_SIZE,
+        height: TILE_SIZE,
+      };
+    }
+
+    if (object.type === 6) {
+      return {
+        x: object.x - 18,
+        y: object.y - 10,
+        width: 36,
+        height: 10,
+      };
+    }
+
+    return null;
   }
 
-  private createRing(x: number, groundOffset: number): LevelRing {
-    const groundY = this.findGroundYAt(x);
-    return {
-      x,
-      y: (groundY > 0 ? groundY : 240) - groundOffset,
-      collected: false,
-    };
+  private getLevelObjectFrameIndex(object: ActiveLevelObject): number | undefined {
+    if (this.isSpringObjectType(object.type)) {
+      if (object.stateFrame <= 0) {
+        return 0;
+      }
+
+      return object.stateFrame > 7 ? 2 : 1;
+    }
+
+    return undefined;
   }
 
-  private createEnemy(x: number, type: LevelEnemy["type"], direction: -1 | 1): LevelEnemy {
-    const width = type === "bee" ? 35 : 30;
-    const height = type === "bee" ? 43 : 24;
-    const groundY = this.findGroundYAt(x + Math.floor(width / 2));
+  private getObjectAnchor(type: number): number {
+    if ((this.frameData[type]?.length ?? 0) > 0) {
+      return HCENTER | VCENTER;
+    }
+
+    if (type === 6 || type === 9 || type === 16 || type === 18 || type === 36 || type === 37 || type === 44 || type === 45 || type === 58) {
+      return BOTTOM | HCENTER;
+    }
+
+    return HCENTER | VCENTER;
+  }
+
+  private createEnemyFromObject(object: ActiveLevelObject): LevelEnemy {
+    const type = this.getEnemyKind(object.type);
+    const dimensions = this.getEnemyDimensions(object.type);
+    const x = object.x - Math.floor(dimensions.width / 2);
+    const y = object.y - Math.floor(dimensions.height / 2);
     return {
       x,
-      y: (groundY > 0 ? groundY : 240) - (type === "bee" ? 84 : height),
-      width,
-      height,
+      y,
+      originX: x,
+      sourceType: object.type,
+      width: dimensions.width,
+      height: dimensions.height,
       alive: true,
       type,
-      direction,
+      direction: (object.param & 1) === 1 ? -1 : 1,
     };
+  }
+
+  private getEnemyKind(type: number): LevelEnemy["type"] {
+    if (type === 40) {
+      return "bee";
+    }
+
+    if (type === 86) {
+      return "fish";
+    }
+
+    if (type === 39) {
+      return "kamere";
+    }
+
+    if (type === 57) {
+      return "kani";
+    }
+
+    return "moto";
+  }
+
+  private getEnemyDimensions(type: number): { width: number; height: number } {
+    const frame = this.frameData[type]?.[0];
+    if (frame) {
+      return {
+        width: frame[2] ?? 24,
+        height: frame[3] ?? 24,
+      };
+    }
+
+    const image = this.objectImages.get(type);
+    if (image) {
+      return {
+        width: image.getWidth(),
+        height: Math.min(image.getHeight(), 32),
+      };
+    }
+
+    return { width: 24, height: 24 };
   }
 
   private getSonicSpriteFrame(): { sx: number; sy: number; width: number; height: number; offsetY: number } {
