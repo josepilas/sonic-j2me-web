@@ -233,7 +233,7 @@ Future milestones:
 # Installation
 
 ```bash
-git clone https://github.com/<your-user>/Sonic-J2ME-Web.git
+git clone https://github.com/josepilas/sonic-j2me-web.git
 cd Sonic-J2ME-Web
 npm install
 ```
