@@ -697,20 +697,20 @@ export class GameCanvas extends Canvas {
     this.actCleared = false;
     this.actClearFrames = 0;
     this.levelRings = [
-      { x: 184, y: 196, collected: false },
-      { x: 216, y: 184, collected: false },
-      { x: 248, y: 196, collected: false },
-      { x: 448, y: 146, collected: false },
-      { x: 480, y: 138, collected: false },
-      { x: 512, y: 146, collected: false },
-      { x: 760, y: 188, collected: false },
-      { x: 792, y: 176, collected: false },
-      { x: 824, y: 188, collected: false },
+      this.createRing(184, 42),
+      this.createRing(216, 54),
+      this.createRing(248, 42),
+      this.createRing(448, 42),
+      this.createRing(480, 54),
+      this.createRing(512, 42),
+      this.createRing(760, 42),
+      this.createRing(792, 54),
+      this.createRing(824, 42),
     ];
     this.levelEnemies = [
-      { x: 352, y: 216, width: 28, height: 24, alive: true, type: "moto", direction: -1 },
-      { x: 620, y: 172, width: 28, height: 24, alive: true, type: "bee", direction: 1 },
-      { x: 980, y: 216, width: 28, height: 24, alive: true, type: "moto", direction: -1 },
+      this.createEnemy(352, "moto", -1),
+      this.createEnemy(620, "bee", 1),
+      this.createEnemy(980, "moto", -1),
     ];
   }
 
@@ -940,6 +940,7 @@ export class GameCanvas extends Canvas {
     const offsetX = Math.floor(this.cameraX);
     const startRow = Math.max(0, Math.floor(this.cameraY / TILE_SIZE) - 1);
     const endRow = Math.min(this.tilemap.length, startRow + Math.ceil(this.getHeight() / TILE_SIZE) + 3);
+    const offsetY = Math.floor(this.cameraY);
 
     for (let row = startRow; row < endRow; row += 1) {
       for (let column = startColumn; column < endColumn; column += 1) {
@@ -948,7 +949,7 @@ export class GameCanvas extends Canvas {
           continue;
         }
 
-        this.drawTile(g, tile, column * TILE_SIZE - offsetX, row * TILE_SIZE - this.cameraY);
+        this.drawTile(g, tile, column * TILE_SIZE - offsetX, row * TILE_SIZE - offsetY);
       }
     }
   }
@@ -1010,7 +1011,21 @@ export class GameCanvas extends Canvas {
 
       const image = enemy.type === "bee" ? this.beeImage : this.enemyImage;
       if (image) {
-        this.drawRegion(g, image, 0, 0, Math.min(24, image.getWidth()), Math.min(24, image.getHeight()), 0, x, y, TOP | LEFT);
+        const frameCount = enemy.type === "bee" ? 3 : 3;
+        const frameHeight = Math.floor(image.getHeight() / frameCount);
+        const frame = Math.floor(this.frame / 8) % frameCount;
+        this.drawRegion(
+          g,
+          image,
+          0,
+          frame * frameHeight,
+          image.getWidth(),
+          frameHeight,
+          enemy.direction === -1 ? TRANS_MIRROR : TRANS_NONE,
+          x,
+          y,
+          TOP | LEFT,
+        );
       } else {
         g.setColor(0xe34a2f);
         g.fillRect(x, y, enemy.width, enemy.height);
@@ -1020,7 +1035,8 @@ export class GameCanvas extends Canvas {
 
   private drawGoalObject(g: Graphics): void {
     const x = Math.round(this.worldWidth - 72 - this.cameraX);
-    const y = 196;
+    const groundY = this.findGroundYAt(this.worldWidth - 60);
+    const y = (groundY > 0 ? groundY : 240) - 32 - Math.floor(this.cameraY);
     if (x < -32 || x > this.getWidth() + 32) {
       return;
     }
@@ -1133,6 +1149,30 @@ export class GameCanvas extends Canvas {
     }
 
     return 0;
+  }
+
+  private createRing(x: number, groundOffset: number): LevelRing {
+    const groundY = this.findGroundYAt(x);
+    return {
+      x,
+      y: (groundY > 0 ? groundY : 240) - groundOffset,
+      collected: false,
+    };
+  }
+
+  private createEnemy(x: number, type: LevelEnemy["type"], direction: -1 | 1): LevelEnemy {
+    const width = type === "bee" ? 35 : 30;
+    const height = type === "bee" ? 43 : 24;
+    const groundY = this.findGroundYAt(x + Math.floor(width / 2));
+    return {
+      x,
+      y: (groundY > 0 ? groundY : 240) - (type === "bee" ? 84 : height),
+      width,
+      height,
+      alive: true,
+      type,
+      direction,
+    };
   }
 
   private getSonicSpriteFrame(): { sx: number; sy: number; width: number; height: number; offsetY: number } {

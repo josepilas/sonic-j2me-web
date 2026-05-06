@@ -79,6 +79,7 @@ export class AudioPlayer {
     element.preload = "auto";
     element.volume = this.volume;
     this.element = element;
+    element.load();
   }
 
   play(loopCount = 1): void {
@@ -92,16 +93,20 @@ export class AudioPlayer {
     }
 
     this.element.loop = loopCount < 0;
-    this.element.currentTime = 0;
+    try {
+      this.element.currentTime = 0;
+    } catch {}
     void this.element.play().catch(() => {
-      // Browsers can block autoplay until a user gesture; game logic should keep running.
+      AudioPlayer.pendingPlayers.set(this, loopCount);
     });
   }
 
   stop(): void {
     if (this.element) {
       this.element.pause();
-      this.element.currentTime = 0;
+      try {
+        this.element.currentTime = 0;
+      } catch {}
     }
 
     this.stopMidi();
