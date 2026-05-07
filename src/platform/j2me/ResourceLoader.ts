@@ -2,19 +2,24 @@ import { AudioPlayer } from "./AudioPlayer";
 import { Image } from "./Image";
 
 type AssetKind = "images" | "audio" | "levels" | "text";
+export type AssetProfile = "runtime" | "source-j2me";
+
+interface LoadOptions {
+  profile?: AssetProfile;
+}
 
 const binaryExtensions = new Set([".act", ".bct", ".bin", ".blt", ".bmd", ".scd"]);
 const imageExtensions = new Set([".png"]);
 const audioExtensions = new Set([".amr", ".mid", ".mp3", ".ogg", ".wav"]);
-const textExtensions = new Set([".txt"]);
+const textExtensions = new Set([".json", ".txt"]);
 
 export class ResourceLoader {
-  async loadImage(path: string): Promise<Image> {
-    return Image.createImage(this.resolveAssetPath(path, "images"));
+  async loadImage(path: string, options: LoadOptions = {}): Promise<Image> {
+    return Image.createImage(this.resolveAssetPath(path, "images", options.profile));
   }
 
-  async loadBinary(path: string): Promise<Uint8Array> {
-    const response = await fetch(this.resolveAssetPath(path, "levels"));
+  async loadBinary(path: string, options: LoadOptions = {}): Promise<Uint8Array> {
+    const response = await fetch(this.resolveAssetPath(path, "levels", options.profile));
     if (!response.ok) {
       throw new Error(`Unable to load binary resource: ${path}`);
     }
@@ -22,8 +27,8 @@ export class ResourceLoader {
     return new Uint8Array(await response.arrayBuffer());
   }
 
-  async loadText(path: string): Promise<string> {
-    const response = await fetch(this.resolveAssetPath(path, "text"));
+  async loadText(path: string, options: LoadOptions = {}): Promise<string> {
+    const response = await fetch(this.resolveAssetPath(path, "text", options.profile));
     if (!response.ok) {
       throw new Error(`Unable to load text resource: ${path}`);
     }
@@ -31,13 +36,13 @@ export class ResourceLoader {
     return response.text();
   }
 
-  async loadAudio(path: string): Promise<AudioPlayer> {
+  async loadAudio(path: string, options: LoadOptions = {}): Promise<AudioPlayer> {
     const player = new AudioPlayer();
-    await player.load(this.resolveAssetPath(path, "audio"));
+    await player.load(this.resolveAssetPath(path, "audio", options.profile));
     return player;
   }
 
-  resolveAssetPath(path: string, preferredKind: AssetKind): string {
+  resolveAssetPath(path: string, preferredKind: AssetKind, profile: AssetProfile = "runtime"): string {
     if (
       path.startsWith("http://")
       || path.startsWith("https://")
@@ -52,7 +57,8 @@ export class ResourceLoader {
     const extension = this.getExtension(normalized);
     const kind = this.resolveKind(extension) ?? preferredKind;
     const assetName = kind === "audio" && extension === "" ? `${normalized}.mid` : normalized;
-    return `/assets/${kind}/${assetName}`;
+    const root = profile === "source-j2me" ? "/assets/source-j2me" : "/assets";
+    return `${root}/${kind}/${assetName}`;
   }
 
   private resolveKind(extension: string): AssetKind | null {

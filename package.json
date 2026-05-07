@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "extract:sonicjar": "node tools/extract-sonicjar-data.mjs",
+    "prepare:sonicjar": "node tools/extract-sonicjar-data.mjs && node tools/prepare-sonicjar-assets.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

@@ -45,7 +45,7 @@ export class Font {
 
   toCanvasFont(): string {
     const weight = this.style === STYLE_BOLD ? "700" : "400";
-    const family = this.face === FACE_SYSTEM ? 'system-ui, "Segoe UI", sans-serif' : "sans-serif";
+    const family = this.face === FACE_SYSTEM ? '"Courier New", Consolas, monospace' : "monospace";
     return `${weight} ${this.resolvePixelSize()}px ${family}`;
   }
 

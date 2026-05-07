@@ -1,8 +1,11 @@
 import { ResourceLoader } from "../platform/j2me/ResourceLoader";
 import { transforms } from "../data/transforms";
+import { expandRingPatternPosition, isRingPatternObjectType } from "../data/objectTypes";
+import { getZoneDefinition } from "../data/zones";
 import { readInt32BE, readUint16BE } from "../utils/binary";
 
 export interface LevelTile {
+  blockId: number;
   tileId: number;
   transform: number;
   priority: boolean;
@@ -33,6 +36,11 @@ export interface LevelObject {
   ring: boolean;
 }
 
+export interface ObjectSize {
+  width: number;
+  height: number;
+}
+
 export class LevelLoader {
   private readonly resources = new ResourceLoader();
 
@@ -41,11 +49,20 @@ export class LevelLoader {
   }
 
   async loadGreenHillAct(actID: number): Promise<DecodedLevel> {
+    return this.loadZoneAct(0, actID);
+  }
+
+  async loadZoneAct(zoneID: number, actID: number): Promise<DecodedLevel> {
+    const zone = getZoneDefinition(zoneID);
+    if (!zone.mapDataFile) {
+      throw new Error(`Zone ${zone.name} map data is only available in the source-j2me reference set for now`);
+    }
+
     const [mapData, zoneBmd, zoneBlt, mapLayer, collisionMasks] = await Promise.all([
-      this.loadLevelBinary("mc_gh_map_data.bin"),
-      this.loadLevelBinary("zone1.bmd"),
-      this.loadLevelBinary("zone1.blt"),
-      this.loadLevelBinary("MapLzone1.blt"),
+      this.loadLevelBinary(zone.mapDataFile),
+      this.loadLevelBinary(`${zone.assetPrefix}.bmd`),
+      this.loadLevelBinary(`${zone.assetPrefix}.blt`),
+      this.loadLevelBinary(zone.mapLayerFile),
       this.loadLevelBinary("blkcol.bct"),
     ]);
 
@@ -58,8 +75,20 @@ export class LevelLoader {
     return this.parseJavaInt3D(await this.loadLevelBinary("framedata.bin"));
   }
 
+  async loadObjectSizeTable(): Promise<ObjectSize[]> {
+    return this.parseJavaInt2D(await this.loadLevelBinary("mc_obj_size_table.bin")).map(([width = 0, height = 0]) => ({
+      width,
+      height,
+    }));
+  }
+
   async loadGreenHillObjects(actID: number): Promise<LevelObject[]> {
-    const actData = await this.loadLevelBinary("ZONE1ACT.act");
+    return this.loadZoneObjects(0, actID);
+  }
+
+  async loadZoneObjects(zoneID: number, actID: number): Promise<LevelObject[]> {
+    const zone = getZoneDefinition(zoneID);
+    const actData = await this.loadLevelBinary(zone.actFile);
     const chunks = this.parseActChunks(actData);
     const chunk = chunks[Math.min(Math.max(actID, 0), chunks.length - 1)] ?? chunks[0] ?? new Uint8Array();
     return this.decodeActObjects(chunk);
@@ -91,10 +120,12 @@ export class LevelLoader {
       const param = chunk[offset + 4] ?? 0;
       const type = chunk[offset + 5] ?? 0;
       const count = chunk[offset + 6] ?? 0;
-      const instances = this.isRingPatternType(type) ? count + 1 : 1;
+      const instances = isRingPatternObjectType(type) ? count + 1 : 1;
 
       for (let instanceIndex = 0; instanceIndex < instances; instanceIndex += 1) {
-        const position = this.expandActObjectPosition(type, baseX, baseY, instanceIndex);
+        const position = isRingPatternObjectType(type)
+          ? expandRingPatternPosition(type, baseX, baseY, instanceIndex)
+          : { x: baseX, y: baseY };
         objects.push({
           type,
           x: position.x,
@@ -103,41 +134,12 @@ export class LevelLoader {
           count,
           sourceIndex,
           instanceIndex,
-          ring: this.isRingPatternType(type),
+          ring: isRingPatternObjectType(type),
         });
       }
     }
 
     return objects;
-  }
-
-  private isRingPatternType(type: number): boolean {
-    return type === 0 || type === 1 || (type >= 63 && type <= 69);
-  }
-
-  private expandActObjectPosition(type: number, x: number, y: number, instanceIndex: number): { x: number; y: number } {
-    switch (type) {
-      case 0:
-        return { x: x + instanceIndex * 24, y };
-      case 1:
-        return { x, y: y + instanceIndex * 24 };
-      case 63:
-        return { x: x - instanceIndex * 16, y: y + instanceIndex * 16 };
-      case 64:
-        return { x: x + instanceIndex * 16, y: y + instanceIndex * 16 };
-      case 65:
-        return { x: x + instanceIndex * 32, y: y + instanceIndex * 32 };
-      case 66:
-        return { x: x + instanceIndex * 16, y };
-      case 67:
-        return { x: x + instanceIndex * 32, y };
-      case 68:
-        return { x, y: y + instanceIndex * 16 };
-      case 69:
-        return { x, y: y + instanceIndex * 32 };
-      default:
-        return { x, y };
-    }
   }
 
   private decodeBlockTilemap(
@@ -172,6 +174,7 @@ export class LevelLoader {
         const collisionB = (flags >> 5) > 1;
 
         tileRow.push({
+          blockId,
           tileId,
           transform,
           priority: (mapLayer[tileId] ?? 0) !== 0,
@@ -258,6 +261,30 @@ export class LevelLoader {
     const values: number[][][] = [];
     for (let index = 0; index < length; index += 1) {
       values.push(readIntArray2D());
+    }
+
+    return values;
+  }
+
+  private parseJavaInt2D(data: Uint8Array): number[][] {
+    let offset = 0;
+
+    const readInt = () => {
+      const value = readInt32BE(data, offset);
+      offset += 4;
+      return value;
+    };
+
+    const length = readInt();
+    const values: number[][] = [];
+    for (let index = 0; index < length; index += 1) {
+      const rowLength = readInt();
+      const row: number[] = [];
+      for (let item = 0; item < rowLength; item += 1) {
+        row.push(readInt());
+      }
+
+      values.push(row);
     }
 
     return values;

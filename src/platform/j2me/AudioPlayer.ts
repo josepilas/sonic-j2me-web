@@ -33,6 +33,7 @@ export class AudioPlayer {
   private midiLoopCount = 1;
   private midiLoopsCompleted = 0;
   private midiPlayStartTime = 0;
+  private ready: Promise<void> = Promise.resolve();
   private volume = 1;
 
   static async unlock(): Promise<void> {
@@ -79,7 +80,27 @@ export class AudioPlayer {
     element.preload = "auto";
     element.volume = this.volume;
     this.element = element;
+    this.ready = new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        element.removeEventListener("canplaythrough", finish);
+        element.removeEventListener("loadeddata", finish);
+        element.removeEventListener("error", finish);
+        window.clearTimeout(timeout);
+        resolve();
+      };
+      const timeout = window.setTimeout(finish, 2500);
+      element.addEventListener("canplaythrough", finish, { once: true });
+      element.addEventListener("loadeddata", finish, { once: true });
+      element.addEventListener("error", finish, { once: true });
+    });
     element.load();
+    await this.ready;
   }
 
   play(loopCount = 1): void {
@@ -96,7 +117,7 @@ export class AudioPlayer {
     try {
       this.element.currentTime = 0;
     } catch {}
-    void this.element.play().catch(() => {
+    void this.ready.then(() => this.element?.play()).catch(() => {
       AudioPlayer.pendingPlayers.set(this, loopCount);
     });
   }
@@ -117,6 +138,7 @@ export class AudioPlayer {
     this.stop();
     this.element = null;
     this.midi = null;
+    this.ready = Promise.resolve();
   }
 
   setVolume(level: number): void {

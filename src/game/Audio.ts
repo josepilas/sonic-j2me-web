@@ -23,20 +23,6 @@ export const AUDIO_TRACKS = [
   "chaosemerald",
 ] as const;
 
-const OGG_AUDIO_TRACKS = new Set<string>([
-  "greenhill_loop",
-  "marble_loop",
-  "springyard_loop",
-  "invincible",
-  "1up",
-  "maintitle",
-  "ending",
-  "bossstage",
-  "stageclear",
-  "gameover",
-  "continue",
-]);
-
 export class Audio {
   private readonly resources = new ResourceLoader();
   public audioTracks: readonly string[] = AUDIO_TRACKS;
@@ -136,11 +122,7 @@ export class Audio {
       return trackName;
     }
 
-    if (OGG_AUDIO_TRACKS.has(trackName)) {
-      return `/assets/ogg-audio/${trackName}.ogg`;
-    }
-
-    return trackName;
+    return `/assets/ogg-audio/${trackName}.ogg`;
   }
 
   private async getOrLoadPlayer(path: string): Promise<AudioPlayer> {
