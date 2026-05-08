@@ -13,6 +13,7 @@ import {
   OBJECT_HACHI,
   OBJECT_KAMERE,
   OBJECT_KANI,
+  OBJECT_SPIKED_BRIDGE,
   SOURCE_OBJECT_IMAGE_FILES,
   getFrameDataType,
   isBridgeObjectType,
@@ -38,7 +39,10 @@ import {
   RIGHT,
   TOP,
   TRANS_MIRROR,
+  TRANS_MIRROR_ROT180,
+  TRANS_MIRROR_ROT270,
   TRANS_NONE,
+  TRANS_ROT90,
   VCENTER,
 } from "../platform/j2me/Graphics";
 import type { Graphics } from "../platform/j2me/Graphics";
@@ -87,6 +91,8 @@ interface LevelEnemy {
 interface ActiveLevelObject extends LevelObject {
   active: boolean;
   stateFrame: number;
+  bridgeDip: number;
+  bridgeSegment: number;
 }
 
 interface PlayerState {
@@ -117,6 +123,7 @@ const SONIC_GRAVITY = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.gravity);
 const SONIC_JUMP_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.jumpSpeed);
 const SONIC_SHORT_JUMP_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.shortJumpSpeed);
 const SONIC_SPRING_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.springSpeed);
+const SONIC_WEAK_SPRING_SPEED = mainCanvasVelocityToRuntime(2560);
 const SONIC_ENEMY_BOUNCE_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.enemyBounceSpeed);
 const SONIC_HURT_X_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.hurtXSpeed);
 const SONIC_HURT_Y_SPEED = mainCanvasVelocityToRuntime(MAIN_CANVAS_PHYSICS.hurtYSpeed);
@@ -135,6 +142,7 @@ const SONIC_SENSOR_INSET = 4;
 const SONIC_LOOP_GATE_BLOCKS = new Set([42, 43, 52, 53, 54]);
 const SONIC_JUMP_BUFFER_FRAMES = 6;
 const SONIC_GROUNDED_GRACE_FRAMES = 5;
+const SOURCE_BRIDGE_SEGMENTS = 12;
 const GREEN_HILL_ACT_SPAWNS = [
   { x: 80, y: 944 + 20 },
   { x: 80, y: 252 + 20 },
@@ -207,6 +215,7 @@ export class GameCanvas extends Canvas {
   private zoneImage: Image | null = null;
   private distantZoneImage: Image | null = null;
   private sonicImage: Image | null = null;
+  private weakSpringImage: Image | null = null;
   private enemyImage: Image | null = null;
   private beeImage: Image | null = null;
   private readonly objectImages = new Map<number, Image>();
@@ -394,8 +403,8 @@ export class GameCanvas extends Canvas {
     }
 
     void this.loadTexts();
-      void this.audio.preloadTrack(this.zoneID);
-    void this.audio.play(9, -1);
+    void this.audio.preloadZoneBgm(this.zoneID, this.actID, true);
+    void this.audio.playMusicId(15, -1);
   }
 
   async loadAssets(): Promise<void> {
@@ -428,10 +437,11 @@ export class GameCanvas extends Canvas {
   async loadFirstActAssets(): Promise<void> {
     const zone = getZoneDefinition(this.zoneID);
     this.loadingStatus = "LOADING IMAGES";
-    const [zoneImage, distantZoneImage, sonicImage, ringImage, enemyImage, beeImage] = await Promise.all([
+    const [zoneImage, distantZoneImage, sonicImage, weakSpringImage, ringImage, enemyImage, beeImage] = await Promise.all([
       this.resources.loadImage(`${zone.assetPrefix}.png`),
       this.resources.loadImage(`distant_${zone.assetPrefix}.png`),
       this.resources.loadImage("sonic.png"),
+      this.resources.loadImage("sjump2.png"),
       this.resources.loadImage("ring.png"),
       this.resources.loadImage("musi.png"),
       this.resources.loadImage("hachi.png"),
@@ -440,11 +450,12 @@ export class GameCanvas extends Canvas {
     this.zoneImage = zoneImage;
     this.distantZoneImage = distantZoneImage;
     this.sonicImage = sonicImage;
+    this.weakSpringImage = weakSpringImage;
     this.ringImage = ringImage;
     this.enemyImage = enemyImage;
     this.beeImage = beeImage;
     await this.loadObjectImages();
-    void this.audio.preloadTrack(this.zoneID);
+    void this.audio.preloadZoneBgm(this.zoneID, this.actID, true);
 
     this.loadingStatus = "LOADING LEVEL DATA";
     const distantBgTables = JSON.parse(
@@ -741,7 +752,7 @@ export class GameCanvas extends Canvas {
       this.appState = APP_STATE_GAME;
       this.commandTexts[0] = "ESC";
       this.commandTexts[1] = "PAUSE";
-      void this.audio.interruptTrackAndPlay(this.zoneID, -1);
+      void this.audio.playZoneBgm(this.zoneID, this.actID, true);
       this.saveGameProgress();
     }
   }
@@ -786,7 +797,7 @@ export class GameCanvas extends Canvas {
     if (this.player.x > this.worldWidth - 96) {
       this.actCleared = true;
       this.score += 5000;
-      void this.audio.interruptTrackAndPlay("stageclear", 1);
+      void this.audio.playMusicId(20, 1);
       this.saveGameProgress();
     }
   }
@@ -894,6 +905,8 @@ export class GameCanvas extends Canvas {
         y: this.toCanvasCoordinate(object.y),
         active: true,
         stateFrame: 0,
+        bridgeDip: 0,
+        bridgeSegment: -1,
       }));
     this.levelRings = this.levelObjects
       .filter((object) => object.ring)
@@ -1402,15 +1415,39 @@ export class GameCanvas extends Canvas {
         continue;
       }
 
-      if (previousBottom > springRect.y + 8 && this.player.vy >= 0) {
-        continue;
+      const springMode = Math.floor(object.count / 16);
+      const springSpeed = this.getSpringLaunchSpeed(object);
+      if (springMode === 1) {
+        const direction = (object.param & 1) === 1 ? -1 : 1;
+        this.player.x = direction > 0
+          ? springRect.x + springRect.width + 1
+          : springRect.x - this.player.width - 1;
+        this.player.vx = direction * springSpeed;
+        this.player.groundSpeed = this.player.vx;
+        this.player.vy = 0;
+        this.player.facing = direction;
+      } else if (springMode === 2) {
+        if (this.player.vy <= 0 || previousY < springRect.y + springRect.height) {
+          continue;
+        }
+
+        this.player.y = springRect.y + springRect.height + 1;
+        this.player.vy = springSpeed;
+        this.player.groundSpeed = this.player.vx;
+      } else {
+        if (previousBottom > springRect.y + 8 && this.player.vy >= 0) {
+          continue;
+        }
+
+        this.player.y = springRect.y - this.player.height;
+        this.player.vy = -springSpeed;
+        this.player.groundSpeed = this.player.vx;
       }
 
-      this.player.y = springRect.y - this.player.height;
-      this.player.vy = -SONIC_SPRING_SPEED;
       this.player.grounded = false;
       this.player.jumping = true;
-      this.player.groundSpeed = this.player.vx;
+      this.player.rolling = false;
+      this.player.crouching = false;
       this.player.springLaunchFrames = SONIC_SPRING_LAUNCH_FRAMES;
       this.jumpBufferFrames = 0;
       this.groundedGraceFrames = 0;
@@ -1429,6 +1466,21 @@ export class GameCanvas extends Canvas {
     const previousBottom = previousY + this.player.height;
     const playerRect = this.getPlayerRect();
     for (const object of this.levelObjects) {
+      if (isBridgeObjectType(object.type)) {
+        const bridgeRect = this.getBridgePlatformRect(object);
+        if (previousBottom <= bridgeRect.y + 8 && this.intersects(playerRect, bridgeRect)) {
+          const segment = this.getBridgeSegmentAt(object, this.player.x + Math.floor(this.player.width / 2));
+          object.bridgeSegment = segment;
+          object.bridgeDip = Math.min(this.getBridgeTargetDip(segment), object.bridgeDip + 1);
+          this.player.y = bridgeRect.y + object.bridgeDip - this.player.height;
+          this.player.vy = 0;
+          this.player.grounded = true;
+          this.player.jumping = false;
+          this.player.groundSpeed = this.player.vx;
+          return;
+        }
+      }
+
       const rect = this.getObjectPlatformRect(object);
       if (!rect || previousBottom > rect.y + 4 || !this.intersects(playerRect, rect)) {
         continue;
@@ -1447,6 +1499,10 @@ export class GameCanvas extends Canvas {
     for (const object of this.levelObjects) {
       if (object.stateFrame > 0) {
         object.stateFrame -= 1;
+      }
+
+      if (object.bridgeDip > 0) {
+        object.bridgeDip = Math.max(0, object.bridgeDip - 0.5);
       }
     }
   }
@@ -1660,6 +1716,11 @@ export class GameCanvas extends Canvas {
         continue;
       }
 
+      if (this.isSpringObjectType(object.type)) {
+        this.drawSpringObject(g, object, cameraX, cameraY);
+        continue;
+      }
+
       if (isItemBoxObjectType(object.type)) {
         this.drawItemBoxObject(g, image, object, cameraX, cameraY);
         continue;
@@ -1691,27 +1752,73 @@ export class GameCanvas extends Canvas {
     cameraX: number,
     cameraY: number,
   ): void {
-    const size = this.getObjectRuntimeSize(object.type, {
-      width: Math.max(TILE_SIZE, object.count * TILE_SIZE),
-      height: TILE_SIZE,
-    });
-    const segments = Math.max(1, Math.round(size.width / TILE_SIZE));
-    const width = segments * TILE_SIZE;
-    const verticalStrip = image.getWidth() <= TILE_SIZE && image.getHeight() > TILE_SIZE * 4;
-    const segmentHeight = verticalStrip ? Math.max(1, Math.floor(image.getHeight() / 14)) : Math.min(TILE_SIZE, image.getHeight());
+    const width = SOURCE_BRIDGE_SEGMENTS * TILE_SIZE;
     const left = Math.round(object.x - width / 2 - cameraX);
-    const top = Math.round(object.y - segmentHeight / 2 - cameraY);
-    if (left < -width - 24 || left > this.getWidth() + 24 || top < -24 || top > this.getHeight() + 24) {
+    const top = Math.round(object.y - cameraY);
+    if (left < -width - 24 || left > this.getWidth() + 24 || top < -32 || top > this.getHeight() + 32) {
       return;
     }
 
-    for (let index = 0; index < segments; index += 1) {
-      const sourceColumns = Math.max(1, Math.floor(image.getWidth() / TILE_SIZE));
-      const sx = verticalStrip ? 0 : (index % sourceColumns) * TILE_SIZE;
-      const sy = 0;
-      const sw = Math.min(TILE_SIZE, image.getWidth() - sx);
-      this.drawRegion(g, image, sx, sy, sw, segmentHeight, TRANS_NONE, left + index * TILE_SIZE, top, LEFT | TOP);
+    for (let index = 0; index < SOURCE_BRIDGE_SEGMENTS; index += 1) {
+      const segmentDip = object.bridgeDip - Math.abs(object.bridgeSegment - index);
+      const y = top + Math.max(0, Math.round(segmentDip));
+      if (object.type === OBJECT_SPIKED_BRIDGE) {
+        const frame = (Math.floor(this.frame / 10) + (SOURCE_BRIDGE_SEGMENTS - index)) % 7;
+        const frameHeight = Math.max(1, Math.floor(image.getHeight() / 7));
+        const wobble = frame < 4 ? -3 : 3;
+        this.drawRegion(
+          g,
+          image,
+          0,
+          frame * frameHeight,
+          Math.min(TILE_SIZE, image.getWidth()),
+          frameHeight,
+          TRANS_NONE,
+          left + index * TILE_SIZE,
+          y + wobble,
+          LEFT | TOP,
+        );
+        continue;
+      }
+
+      const sx = Math.max(0, image.getWidth() - TILE_SIZE);
+      this.drawRegion(g, image, sx, 0, TILE_SIZE, Math.min(TILE_SIZE, image.getHeight()), TRANS_NONE, left + index * TILE_SIZE, y, LEFT | TOP);
     }
+  }
+
+  private drawSpringObject(g: Graphics, object: ActiveLevelObject, cameraX: number, cameraY: number): void {
+    const image = object.count % 16 === 2 ? this.weakSpringImage ?? this.objectImages.get(object.type) : this.objectImages.get(object.type);
+    if (!image) {
+      return;
+    }
+
+    const state = object.stateFrame > 7 ? 2 : object.stateFrame > 0 ? 1 : 0;
+    const regions = [
+      { sx: 0, sy: 0, sw: 24, sh: 12, y: 0 },
+      { sx: 0, sy: 0, sw: 24, sh: 6, y: 0 },
+      { sx: 0, sy: 18, sw: 24, sh: 24, y: -6 },
+    ] as const;
+    const region = regions[state];
+    const mode = Math.floor(object.count / 16);
+    const x = Math.round(object.x - cameraX);
+    const y = Math.round(object.y - cameraY + region.y);
+    if (x < -32 || x > this.getWidth() + 32 || y < -40 || y > this.getHeight() + 40) {
+      return;
+    }
+
+    if (mode === 1) {
+      const transform = (object.param & 1) === 1 ? TRANS_MIRROR_ROT270 : TRANS_ROT90;
+      const offsetX = (object.param & 1) === 1 ? -6 : 6;
+      this.drawRegion(g, image, region.sx, region.sy, region.sw, region.sh, transform, x + offsetX, y, HCENTER | VCENTER);
+      return;
+    }
+
+    if (mode === 2) {
+      this.drawRegion(g, image, region.sx, region.sy, region.sw, region.sh, TRANS_MIRROR_ROT180, x, y, HCENTER | BOTTOM);
+      return;
+    }
+
+    this.drawRegion(g, image, region.sx, region.sy, region.sw, region.sh, TRANS_NONE, x, y, HCENTER | TOP);
   }
 
   private drawItemBoxObject(
@@ -1974,13 +2081,22 @@ export class GameCanvas extends Canvas {
   }
 
   private getSpringRect(object: ActiveLevelObject): CollisionRect {
-    const size = this.getObjectRuntimeSize(object.type, { width: 24, height: 18 });
+    const mode = Math.floor(object.count / 16);
+    const size = mode === 1
+      ? { width: 12, height: 24 }
+      : mode === 2
+        ? { width: 24, height: 12 }
+        : this.getObjectRuntimeSize(object.type, { width: 24, height: 18 });
     return {
       x: object.x - Math.floor(size.width / 2),
       y: object.y - Math.floor(size.height / 2),
       width: size.width,
       height: Math.max(12, Math.floor(size.height * 0.65)),
     };
+  }
+
+  private getSpringLaunchSpeed(object: ActiveLevelObject): number {
+    return object.count % 16 === 2 ? SONIC_WEAK_SPRING_SPEED : SONIC_SPRING_SPEED;
   }
 
   private getItemBoxRect(object: ActiveLevelObject): CollisionRect {
@@ -1999,16 +2115,7 @@ export class GameCanvas extends Canvas {
     }
 
     if (isBridgeObjectType(object.type)) {
-      const size = this.getObjectRuntimeSize(object.type, {
-        width: Math.max(TILE_SIZE, object.count * TILE_SIZE),
-        height: TILE_SIZE,
-      });
-      return {
-        x: object.x - Math.floor(size.width / 2),
-        y: object.y - Math.floor(size.height / 2),
-        width: size.width,
-        height: Math.max(6, Math.min(TILE_SIZE, size.height)),
-      };
+      return this.getBridgePlatformRect(object);
     }
 
     if (object.type === OBJECT_BREAK_PLATFORM) {
@@ -2033,6 +2140,30 @@ export class GameCanvas extends Canvas {
     }
 
     return undefined;
+  }
+
+  private getBridgePlatformRect(object: ActiveLevelObject): CollisionRect {
+    const width = SOURCE_BRIDGE_SEGMENTS * TILE_SIZE;
+    return {
+      x: object.x - Math.floor(width / 2),
+      y: object.y - 6,
+      width,
+      height: 12 + Math.ceil(object.bridgeDip),
+    };
+  }
+
+  private getBridgeSegmentAt(object: ActiveLevelObject, x: number): number {
+    const left = object.x - Math.floor((SOURCE_BRIDGE_SEGMENTS * TILE_SIZE) / 2);
+    return Math.max(0, Math.min(SOURCE_BRIDGE_SEGMENTS - 1, Math.floor((x - left) / TILE_SIZE)));
+  }
+
+  private getBridgeTargetDip(segment: number): number {
+    if (segment <= 0 || segment >= SOURCE_BRIDGE_SEGMENTS - 1) {
+      return 0;
+    }
+
+    const sourceDip = (segment <= 6 ? segment : 6 - (segment % 6)) * 2;
+    return this.toCanvasCoordinate(Math.max(0, sourceDip));
   }
 
   private getObjectAnchor(type: number): number {

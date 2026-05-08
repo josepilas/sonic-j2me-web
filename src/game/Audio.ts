@@ -23,6 +23,39 @@ export const AUDIO_TRACKS = [
   "chaosemerald",
 ] as const;
 
+const SOURCE_MUSIC: Readonly<Record<number, { name: string; loopCount: number }>> = {
+  1: { name: "81_1", loopCount: 1 },
+  2: { name: "81_2", loopCount: -1 },
+  3: { name: "82_1", loopCount: 1 },
+  4: { name: "82_2", loopCount: -1 },
+  5: { name: "83_1", loopCount: 1 },
+  6: { name: "83_2", loopCount: -1 },
+  7: { name: "84_1", loopCount: 1 },
+  8: { name: "84_2", loopCount: -1 },
+  9: { name: "85_1", loopCount: 1 },
+  10: { name: "85_2", loopCount: -1 },
+  11: { name: "86", loopCount: -1 },
+  12: { name: "87", loopCount: -1 },
+  13: { name: "88", loopCount: 1 },
+  14: { name: "89", loopCount: -1 },
+  15: { name: "8a", loopCount: 1 },
+  16: { name: "8b", loopCount: 1 },
+  17: { name: "8c", loopCount: -1 },
+  18: { name: "8d_1", loopCount: 1 },
+  19: { name: "8d_2", loopCount: -1 },
+  20: { name: "8e", loopCount: 1 },
+  21: { name: "8f", loopCount: 1 },
+  22: { name: "90", loopCount: 1 },
+  23: { name: "91", loopCount: 1 },
+  24: { name: "92", loopCount: -1 },
+  25: { name: "93", loopCount: 1 },
+  26: { name: "SEGA", loopCount: 1 },
+  27: { name: "ad", loopCount: 1 },
+  28: { name: "c5", loopCount: 1 },
+  29: { name: "b2", loopCount: 1 },
+  30: { name: "88", loopCount: 1 },
+};
+
 export class Audio {
   private readonly resources = new ResourceLoader();
   public audioTracks: readonly string[] = AUDIO_TRACKS;
@@ -66,6 +99,34 @@ export class Audio {
     }
 
     await this.getOrLoadPlayer(path);
+  }
+
+  async playMusicId(id: number, loopCount?: number): Promise<void> {
+    const music = SOURCE_MUSIC[id];
+    if (!music) {
+      this.stop();
+      return;
+    }
+
+    await this.playTrack(this.resolveSourceMusicPath(music.name), loopCount ?? music.loopCount);
+    this.currentTrack = id;
+  }
+
+  async preloadMusicId(id: number): Promise<void> {
+    const music = SOURCE_MUSIC[id];
+    if (!music) {
+      return;
+    }
+
+    await this.preloadTrack(this.resolveSourceMusicPath(music.name));
+  }
+
+  async playZoneBgm(zoneID: number, actID: number, loopPart = true): Promise<void> {
+    await this.playMusicId(this.getZoneBgmId(zoneID, actID, loopPart));
+  }
+
+  async preloadZoneBgm(zoneID: number, actID: number, loopPart = true): Promise<void> {
+    await this.preloadMusicId(this.getZoneBgmId(zoneID, actID, loopPart));
   }
 
   interruptTrack(): void {
@@ -117,12 +178,56 @@ export class Audio {
       || trackName.startsWith("data:")
       || trackName.startsWith("blob:")
       || trackName.startsWith("/assets/")
+      || trackName.startsWith("assets/")
       || /\.[a-z0-9]+$/i.test(trackName)
     ) {
       return trackName;
     }
 
-    return `/assets/ogg-audio/${trackName}.ogg`;
+    return `assets/ogg-audio/${trackName}.ogg`;
+  }
+
+  private resolveSourceMusicPath(name: string): string {
+    return `assets/source-j2me/ogg-audio/${name}.ogg`;
+  }
+
+  private getZoneBgmId(zoneID: number, actID: number, loopPart: boolean): number {
+    const finalAct = actID >= 2;
+    if (loopPart) {
+      switch (zoneID) {
+        case 0:
+          return 2;
+        case 1:
+          return finalAct ? 11 : 4;
+        case 2:
+          return 6;
+        case 3:
+          return 8;
+        case 4:
+          return 10;
+        case 5:
+          return finalAct ? 18 : 11;
+        default:
+          return 2;
+      }
+    }
+
+    switch (zoneID) {
+      case 0:
+        return 1;
+      case 1:
+        return finalAct ? 11 : 3;
+      case 2:
+        return 5;
+      case 3:
+        return 7;
+      case 4:
+        return 9;
+      case 5:
+        return finalAct ? 19 : 11;
+      default:
+        return 2;
+    }
   }
 
   private async getOrLoadPlayer(path: string): Promise<AudioPlayer> {

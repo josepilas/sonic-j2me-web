@@ -1,3 +1,4 @@
+import { isExternalUrl, resolveAppPath } from "./AssetPath";
 import { AudioPlayer } from "./AudioPlayer";
 import { Image } from "./Image";
 
@@ -43,22 +44,20 @@ export class ResourceLoader {
   }
 
   resolveAssetPath(path: string, preferredKind: AssetKind, profile: AssetProfile = "runtime"): string {
-    if (
-      path.startsWith("http://")
-      || path.startsWith("https://")
-      || path.startsWith("data:")
-      || path.startsWith("blob:")
-      || path.startsWith("/assets/")
-    ) {
+    if (isExternalUrl(path)) {
       return path;
     }
 
     const normalized = path.replace(/^\/+/, "");
+    if (normalized.startsWith("assets/")) {
+      return resolveAppPath(normalized);
+    }
+
     const extension = this.getExtension(normalized);
     const kind = this.resolveKind(extension) ?? preferredKind;
     const assetName = kind === "audio" && extension === "" ? `${normalized}.mid` : normalized;
-    const root = profile === "source-j2me" ? "/assets/source-j2me" : "/assets";
-    return `${root}/${kind}/${assetName}`;
+    const root = profile === "source-j2me" ? "assets/source-j2me" : "assets";
+    return resolveAppPath(`${root}/${kind}/${assetName}`);
   }
 
   private resolveKind(extension: string): AssetKind | null {
